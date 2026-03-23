@@ -1,0 +1,303 @@
+# =============================================================================
+# Automated Browser Session Manager — CI/CD Pipeline
+# =============================================================================
+# Runs the browser automation demo on a scheduled interval or on manual trigger.
+# Includes Cloudflare WARP VPN, Brave browser, and full SeleniumBase setup.
+# =============================================================================
+
+name: Browser Session Manager
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      debug_mode:
+        description: "Enable debug logging"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      channel:
+        description: "Target channel name (optional override)"
+        required: false
+        default: ""
+        type: string
+
+# ---------------------------------------------------------------------------
+# Prevent concurrent runs from overlapping
+# ---------------------------------------------------------------------------
+concurrency:
+  group: browser-session-${{ github.ref }}
+  cancel-in-progress: true
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+env:
+  PY_COLORS: "1"
+  PYTHONUNBUFFERED: "1"
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  # =========================================================================
+  # Lint & Validation (fast-fail gate before the heavy job)
+  # =========================================================================
+  validate:
+    name: "Validate — Lint & Syntax Check"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install linting tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff pyright
+
+      - name: Lint with Ruff
+        continue-on-error: true
+        run: ruff check --output-format=github .
+
+      - name: Type check with Pyright
+        continue-on-error: true
+        run: pyright ult.py
+
+      - name: Verify Python syntax
+        run: python -m py_compile ult.py
+
+  # =========================================================================
+  # Main Build & Run
+  # =========================================================================
+  build:
+    name: "Run — Browser Session Manager"
+    needs: validate
+    runs-on: ${{ matrix.os }}
+
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.13"]
+
+    steps:
+      # -------------------------------------------------------------------
+      # 1. Repository & Language Setup
+      # -------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # -------------------------------------------------------------------
+      # 2. System Locale Configuration
+      # -------------------------------------------------------------------
+      - name: Configure system locale
+        run: |
+          echo "::group::Installing locale packages"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends tzdata locales
+          echo "::endgroup::"
+
+          echo "::group::Generating en_US.UTF-8 locale"
+          sudo locale-gen en_US.UTF-8
+          sudo localectl set-locale LANG="en_US.UTF-8"
+          echo "LANG=en_US.UTF-8" >> "$GITHUB_ENV"
+          echo "LC_ALL=en_US.UTF-8" >> "$GITHUB_ENV"
+          sudo update-locale
+          echo "::endgroup::"
+
+          echo "::group::Locale verification"
+          locale
+          localectl status
+          echo "::endgroup::"
+
+      # -------------------------------------------------------------------
+      # 3. Cloudflare WARP Installation & Connection
+      # -------------------------------------------------------------------
+      - name: Install Cloudflare WARP
+        run: |
+          echo "::group::Adding Cloudflare WARP repository"
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
+            | sudo gpg --yes --dearmor \
+                --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] \
+            https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          echo "::endgroup::"
+
+          echo "::group::Installing WARP client"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cloudflare-warp
+          echo "::endgroup::"
+
+          echo "::group::Registering and connecting"
+          sudo warp-cli --accept-tos registration new
+          sudo warp-cli --accept-tos mode warp+doh
+          sudo warp-cli --accept-tos connect
+          echo "::endgroup::"
+
+          echo "Waiting for WARP tunnel to stabilise..."
+          sleep 5
+
+      - name: Verify WARP connection
+        run: |
+          echo "Checking Cloudflare WARP status..."
+          TRACE=$(curl -s https://www.cloudflare.com/cdn-cgi/trace)
+          echo "$TRACE"
+
+          if echo "$TRACE" | grep -q "warp=on"; then
+            echo "✅ WARP connection verified."
+          else
+            echo "::warning::WARP connection could not be verified — continuing anyway."
+          fi
+
+      # -------------------------------------------------------------------
+      # 4. Brave Browser Installation
+      # -------------------------------------------------------------------
+      - name: Install Brave Browser
+        run: |
+          echo "::group::Adding Brave repository"
+          sudo apt-get install -y --no-install-recommends curl apt-transport-https
+
+          curl -fsSLo /tmp/brave-browser-archive-keyring.gpg \
+            https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg
+          sudo install -o root -g root -m 644 /tmp/brave-browser-archive-keyring.gpg \
+            /usr/share/keyrings/brave-browser-archive-keyring.gpg
+
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg] \
+            https://brave-browser-apt-release.s3.brave.com/ stable main" \
+            | sudo tee /etc/apt/sources.list.d/brave-browser-release.list
+          echo "::endgroup::"
+
+          echo "::group::Installing Brave"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends brave-browser
+          echo "::endgroup::"
+
+      - name: Verify Brave installation
+        run: |
+          BRAVE_VERSION=$(brave-browser --version 2>/dev/null || echo "not found")
+          echo "Brave version: $BRAVE_VERSION"
+
+          if [ "$BRAVE_VERSION" = "not found" ]; then
+            echo "::warning::Brave browser binary not found in PATH."
+          else
+            echo "✅ Brave installed successfully."
+          fi
+
+      # -------------------------------------------------------------------
+      # 5. Python Dependencies
+      # -------------------------------------------------------------------
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+
+          pip install --upgrade \
+            seleniumbase \
+            pyautogui \
+            pymongo \
+            python-xlib \
+            requests
+
+      - name: Install ChromeDriver
+        run: seleniumbase install chromedriver
+
+      # -------------------------------------------------------------------
+      # 6. Pre-flight Tests (non-blocking)
+      # -------------------------------------------------------------------
+      - name: Test — Python environment
+        run: |
+          echo "::group::Python info"
+          python --version
+          pip list --format=columns
+          echo "::endgroup::"
+
+      - name: Test — SeleniumBase health check
+        continue-on-error: true
+        run: |
+          python -c "
+          from seleniumbase import SB
+          print('SeleniumBase import .............. OK')
+
+          # Quick headless smoke test
+          with SB(uc=True, headless=True) as sb:
+              sb.open('https://example.com')
+              assert 'Example Domain' in sb.get_title()
+              print('Headless browser smoke test ..... OK')
+          "
+
+      - name: Test — Network connectivity
+        continue-on-error: true
+        run: |
+          echo "Geolocation API:"
+          curl -s --max-time 10 http://ip-api.com/json/ | python -m json.tool
+
+          echo ""
+          echo "DNS resolution:"
+          nslookup www.twitch.tv || true
+
+      - name: Test — Display server (Xvfb)
+        continue-on-error: true
+        run: |
+          if [ -n "$DISPLAY" ]; then
+            echo "✅ DISPLAY is set to: $DISPLAY"
+          else
+            echo "ℹ️  DISPLAY is not set — SeleniumBase will use its own virtual display."
+          fi
+
+      # -------------------------------------------------------------------
+      # 7. Main Execution
+      # -------------------------------------------------------------------
+      - name: Run browser session manager
+        run: |
+          CMD="python ult.py"
+
+          if [ "${{ github.event.inputs.debug_mode }}" = "true" ]; then
+            CMD="$CMD"
+            echo "Debug mode enabled."
+          fi
+
+          if [ -n "${{ github.event.inputs.channel }}" ]; then
+            CMD="$CMD --channel ${{ github.event.inputs.channel }}"
+          fi
+
+          echo "Executing: $CMD"
+          $CMD
+
+      # -------------------------------------------------------------------
+      # 8. Artifacts (always upload, even on failure)
+      # -------------------------------------------------------------------
+      - name: Upload screenshots & logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: session-artifacts-${{ matrix.os }}-py${{ matrix.python-version }}-${{ github.run_number }}
+          path: |
+            ./latest_logs/
+            ./*.log
+          retention-days: 0
+          if-no-files-found: ignore
+
+      # -------------------------------------------------------------------
+      # 9. Cleanup
+      # -------------------------------------------------------------------
+      - name: Disconnect WARP
+        if: always()
+        run: |
+          sudo warp-cli --accept-tos disconnect 2>/dev/null || true
+          echo "WARP disconnected."
