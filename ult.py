@@ -349,7 +349,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         channel = args.channel
     else:
         channel = decode_channel_name(args.encoded_channel)
-        channel = "faith"
     logger.info("Channel: %s", channel)
 
     platform = Platform(args.platform)
