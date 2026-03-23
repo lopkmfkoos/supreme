@@ -261,7 +261,7 @@ def run_session(config: SessionConfig) -> bool:
         duration = config.random_duration()
         logger.info("Watching for %d seconds.", duration)
         driver.sleep(duration)
-
+    driver.save_screenshot("komu.png")
     logger.info("Session completed successfully.")
     return True
 
