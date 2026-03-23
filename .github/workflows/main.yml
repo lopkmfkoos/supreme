@@ -288,7 +288,7 @@ jobs:
         with:
           name: session-artifacts-${{ matrix.os }}-py${{ matrix.python-version }}-${{ github.run_number }}
           path: |
-            ./latest_logs/
+            ./*
             ./*.log
           retention-days: 0
           if-no-files-found: ignore
