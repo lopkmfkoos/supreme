@@ -268,7 +268,7 @@ jobs:
           CMD="python ult.py"
 
           if [ "${{ github.event.inputs.debug_mode }}" = "true" ]; then
-            CMD="$CMD --debug"
+            CMD="$CMD"
             echo "Debug mode enabled."
           fi
 
