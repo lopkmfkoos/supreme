@@ -237,6 +237,7 @@ def run_session(config: SessionConfig) -> bool:
         locale="en",
         browser="brave",
         incognito=True,
+        xvfb=True,
         ad_block=config.ad_block,
         chromium_arg=chromium_args,
         proxy=proxy_arg,
